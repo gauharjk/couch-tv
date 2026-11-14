@@ -1,4 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="watch_desc">Brings the Couch TV home screen back when the Home button opens the TV\'s own home. Only sees which screen came forward; reads nothing else.</string>
+    <string name="watch_desc">Brings the Couch TV home screen back when the Home button opens the TV\'s own home, and opens it from the PatchWall button on Xiaomi remotes. Only sees which screen came forward and checks that one button; reads nothing else.</string>
 </resources>

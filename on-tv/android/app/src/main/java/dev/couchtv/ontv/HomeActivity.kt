@@ -48,7 +48,52 @@ class HomeActivity : Activity() {
         App.startService(this)
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         CookieManager.getInstance().setCookie(base, "couchtv_token=${Auth.internalToken}; path=/")
-        val w = WebView(this).apply {
+        val w = makeWeb()
+        web = w
+        shown = java.lang.ref.WeakReference(this)
+        setContentView(w)
+        hideBars()
+        load()
+    }
+
+    /**
+     * Low-memory TVs (1 GB): BridgeService keeps this process important, so Android never reclaims
+     * the home page while another app is in front. Only when Android says memory is critical, and
+     * the page is out of sight, drop the WebView; onStart builds it again. No timer, so normal use
+     * never pays for a rebuild. The activity stays, so Back still lands here.
+     */
+    private fun release() {
+        val w = web ?: return
+        if (front || isFinishing || isDestroyed) return
+        web = null; ready = false
+        banners.clear(); icons.clear()
+        setContentView(View(this).apply { setBackgroundColor(GROUND) })
+        w.stopLoading(); w.removeAllViews(); w.destroy()
+        android.util.Log.i("couchtv.home", "page released (memory low)")
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        // Only the most severe states: RUNNING_CRITICAL (this process runs a service) or COMPLETE (cached).
+        // On a 1 GB TV, RUNNING_LOW arrives every time YouTube or Netflix starts; releasing then made every
+        // return take 3 to 7 seconds, so it is left alone, as are UI_HIDDEN and RUNNING_MODERATE.
+        android.util.Log.i("couchtv.home", "trim level $level")
+        if (level == TRIM_MEMORY_RUNNING_CRITICAL || level >= TRIM_MEMORY_COMPLETE) release()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (web == null) {
+            val w = makeWeb()
+            web = w
+            setContentView(w)
+            hideBars()
+            load()
+        }
+    }
+
+    private var built = 0L
+    private fun makeWeb(): WebView = WebView(this.also { built = android.os.SystemClock.uptimeMillis() }).apply {
             setBackgroundColor(GROUND)
             isFocusable = true; isFocusableInTouchMode = true
             overScrollMode = View.OVER_SCROLL_NEVER
@@ -58,7 +103,10 @@ class HomeActivity : Activity() {
             settings.textZoom = 100
             addJavascriptInterface(Native(), "TVOS")
             webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView, url: String) { ready = true; view.requestFocus() }
+                override fun onPageFinished(view: WebView, url: String) {
+                    ready = true; view.requestFocus()
+                    android.util.Log.i("couchtv.home", "page ready in ${android.os.SystemClock.uptimeMillis() - built} ms")
+                }
                 override fun onReceivedError(view: WebView, req: WebResourceRequest, err: WebResourceError) {
                     // The server may still be starting: try again shortly.
                     if (req.isForMainFrame) { ready = false; main.postDelayed({ load() }, 700) }
@@ -81,12 +129,6 @@ class HomeActivity : Activity() {
                 }
             }
         }
-        web = w
-        shown = java.lang.ref.WeakReference(this)
-        setContentView(w)
-        hideBars()
-        load()
-    }
 
     private fun load() { web?.loadUrl("$base/tv/") }
 
@@ -238,6 +280,7 @@ class HomeActivity : Activity() {
 
     override fun onDestroy() {
         if (shown?.get() === this) shown = null
+        web?.let { web = null; it.stopLoading(); it.destroy() }
         super.onDestroy()
     }
 

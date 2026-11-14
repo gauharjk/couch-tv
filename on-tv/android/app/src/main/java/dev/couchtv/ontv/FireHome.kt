@@ -82,6 +82,37 @@ object FireHome {
                 .map { it.activityInfo.name }.toSet()
         }.getOrDefault(emptySet())
     }
+    /**
+     * Xiaomi's PatchWall (a launcher app, not the TV's HOME on Android TV builds): wherever it would
+     * open (its tile, the remote's PatchWall key, at power-on), Couch TV opens instead. Its own
+     * settings screens are left alone. Needs only the Home watch switched on in Accessibility; it
+     * does not need "Use as home screen", so the Home key can stay with the TV's own home.
+     */
+    const val PATCHWALL = "com.mitv.tvhome.atv"
+    val isXiaomi: Boolean = android.os.Build.MANUFACTURER.equals("Xiaomi", ignoreCase = true)
+    fun isPatchWall(pkg: String?, cls: String?) =
+        pkg == PATCHWALL && cls != null && cls.startsWith("com.mitv.") && !cls.contains("Settings", ignoreCase = true)
+    fun onPatchWall() = jump(force = true)
+
+    /**
+     * Power-on on Xiaomi (PatchWall's old job): the TV first resumes what it had. If that is an HDMI
+     * or TV input (the TV app, com.android.tv), leave it; otherwise open Couch TV. The watch notes
+     * the last real screen that came forward, so this costs no extra calls; the 2 s wait lets the TV
+     * bring its input back first (seen 1.1 s after screen-on on a Redmi MiTV-AXFR0).
+     */
+    private const val TV_APP = "com.android.tv"
+    private val notScreens = setOf("android", "com.android.systemui", "com.google.android.inputmethod.latin")
+    @Volatile private var lastPkg: String? = null
+    private val later = android.os.Handler(android.os.Looper.getMainLooper())
+    fun seen(pkg: String?) { if (pkg != null && pkg !in notScreens) lastPkg = pkg }
+    fun openUnlessTvInput() {
+        later.removeCallbacksAndMessages(null)
+        later.postDelayed({
+            if (lastPkg == TV_APP) Log.i(TAG, "screen on: the TV is on an input, Couch TV stays back")
+            else App.openHome()
+        }, 2_000)
+    }
+
     fun onOtherHome(pkg: String?, cls: String?) {
         if (pkg == null || cls == null || pkg == BuildConfig.APPLICATION_ID) return
         if (App.homeEnabled(App.instance) && cls in homeClasses) jump(force = true)

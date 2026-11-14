@@ -90,6 +90,18 @@
             </intent-filter>
         </activity-alias>
 
+        <!-- A tile that opens the home page itself, for TVs where Couch TV is not the HOME (the TV's own home keeps the Home key). -->
+        <activity-alias
+            android:name=".HomeTile"
+            android:targetActivity=".HomeActivity"
+            android:label="Couch TV Home"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
         <service
             android:name=".BridgeService"
             android:exported="false"
