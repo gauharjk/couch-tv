@@ -1759,3 +1759,24 @@ html:not(.kids-on) .kids { display: none; }
 .kpin-hint { font-size: 1.125rem !important; color: var(--text-3) !important; margin-top: 0.25rem !important; }
 .lighter .kids, .old-engine .kids { background: #1d2140; }
 .lighter .ktile, .lighter .ktrack, .lighter .kapp, .lighter .kkey { transition: none; }
+
+/* ================= Smooth tiles (the on-TV app; Home settings, Look, Smooth tiles) =================
+   NATIVE-TILES-PLAN.md. The app draws the dock's tiles and the Keep watching cards itself, over the
+   page, while nothing else is on screen with them (html.nt): the page's own stay laid out where they
+   are, unseen, and come back the moment a menu or another screen opens. html.nt-cap is on whenever the
+   feature is on in a look it covers, in both states: the cards lose their blur for the solid tint
+   Lighter home uses, and nothing on a tile animates or moves by itself, so a swap between the two
+   copies is not seen. The app's tiles follow these numbers (app.js, ntLook). */
+html.nt.theme-night .grid .app, html.nt.theme-night .shelf-track .ncard { visibility: hidden; }
+html.nt-cap .tile, html.nt-cap .ncard, html.nt-cap .face, html.nt-cap .app .label { transition: none !important; }
+html.nt-cap .tile.focus .face { animation: none; }
+html.nt-cap .tile.focus .face::after { animation: none; opacity: 0; }
+html.nt-cap.theme-night .ncard {
+  background: rgba(30, 20, 28, 0.62) !important; -webkit-backdrop-filter: none !important; backdrop-filter: none !important;
+  box-shadow: inset 0 0 0 0.0625rem rgba(255, 210, 220, 0.16) !important;
+}
+html.nt-cap.theme-night .ncard.focus {
+  transform: scale(1.05) !important;
+  box-shadow: inset 0 0 0 0.0625rem rgba(255, 210, 220, 0.16), 0 0 0 0.1875rem #fff, 0 1.25rem 2.5rem rgba(0, 0, 0, 0.45) !important;
+}
+html.nt-cap.lighter.theme-night .ncard.focus { box-shadow: inset 0 0 0 0.0625rem rgba(255, 210, 220, 0.16), 0 0 0 0.1875rem #fff !important; }

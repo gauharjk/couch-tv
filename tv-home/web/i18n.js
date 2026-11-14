@@ -247,6 +247,7 @@
     keep_show: "Show Keep watching",
     lighter: "Lighter home",
     lighter_note: "For a slow box that stutters: no blur, no soft shadows, a still photo and smaller pictures.",
+    smooth_tiles: "Smooth tiles",
     glass_icons: "Glass app icons",
     glass_icons_note: "Glass app icons show each app's symbol in light glass without its own background, like Apple's clear icons, with its colours back when you move onto it.",
     glass_focus: "Focused app",

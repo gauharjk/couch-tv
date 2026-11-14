@@ -6,14 +6,17 @@ import android.content.pm.ResolveInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.PixelFormat
 import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.drawable.Drawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.DisplayMetrics
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
@@ -53,6 +56,7 @@ class HomeActivity : Activity() {
         shown = java.lang.ref.WeakReference(this)
         setContentView(w)
         hideBars()
+        tiles = TilesLayer(this, tilesHost)
         load()
     }
 
@@ -67,6 +71,7 @@ class HomeActivity : Activity() {
         if (front || isFinishing || isDestroyed) return
         web = null; ready = false
         banners.clear(); icons.clear()
+        tiles?.release(); detachTiles()
         setContentView(View(this).apply { setBackgroundColor(GROUND) })
         w.stopLoading(); w.removeAllViews(); w.destroy()
         android.util.Log.i("couchtv.home", "page released (memory low)")
@@ -78,11 +83,12 @@ class HomeActivity : Activity() {
         // On a 1 GB TV, RUNNING_LOW arrives every time YouTube or Netflix starts; releasing then made every
         // return take 3 to 7 seconds, so it is left alone, as are UI_HIDDEN and RUNNING_MODERATE.
         android.util.Log.i("couchtv.home", "trim level $level")
-        if (level == TRIM_MEMORY_RUNNING_CRITICAL || level >= TRIM_MEMORY_COMPLETE) release()
+        if (level == TRIM_MEMORY_RUNNING_CRITICAL || level >= TRIM_MEMORY_COMPLETE) { release(); tiles?.trim() }
     }
 
     override fun onStart() {
         super.onStart()
+        started = true
         if (web == null) {
             val w = makeWeb()
             web = w
@@ -90,6 +96,80 @@ class HomeActivity : Activity() {
             hideBars()
             load()
         }
+        attachTiles()
+    }
+
+    override fun onStop() {
+        started = false
+        detachTiles()   // the tiles' window surface is freed while the home is out of sight
+        super.onStop()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        attachTiles()   // the first start: the window token exists only now
+    }
+
+    // ---------------------------------------------------------------- smooth tiles (TilesLayer.kt, NATIVE-TILES-PLAN.md)
+
+    private var tiles: TilesLayer? = null
+    private var tilesIn = 0              // where the layer is: 0 nowhere, 1 its own window, 2 over the page
+    private var tilesFallback = false    // its own window was refused once: over the page from then on
+    private var started = false
+
+    private val tilesHost = object : TilesLayer.Host {
+        override fun icon(pkg: String, size: Int): Bitmap? = iconBitmap(pkg, size)
+        override fun art(id: String): ByteArray? = WatchNext.art(id)
+        override fun origin(out: IntArray) { val w = web; if (w != null) w.getLocationOnScreen(out) else { out[0] = 0; out[1] = 0 } }
+        override fun ready(n: Int) = js("window.tv && tv.tilesReady && tv.tilesReady($n)")
+        override fun resync() = js("window.tv && tv.syncTiles && tv.syncTiles()")
+    }
+
+    /**
+     * The layer goes in a panel window on top of this activity's own (so its frames never redraw the WebView),
+     * once the activity's window has a token, and only once; it is taken out again in onStop, release() and
+     * onDestroy, so it never outlives the activity's window. If Android refuses the panel, it goes over the
+     * WebView inside the activity instead.
+     */
+    private fun attachTiles() {
+        val t = tiles ?: return
+        if (!started || isFinishing || isDestroyed) return
+        if (tilesIn == 2 && t.parent == null) tilesIn = 0   // setContentView took it off with the old page
+        if (tilesIn != 0 || t.parent != null) return
+        if (TilesLayer.IN_WINDOW && !tilesFallback) {
+            val token = window.decorView.windowToken ?: return   // onAttachedToWindow comes back here
+            try {
+                val lp = WindowManager.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                    PixelFormat.TRANSLUCENT)
+                lp.token = token
+                lp.gravity = Gravity.TOP or Gravity.START
+                lp.windowAnimations = 0
+                lp.title = "couchtv.tiles"
+                windowManager.addView(t, lp)
+                tilesIn = 1
+            } catch (e: Exception) {   // WindowManager.BadTokenException and the like
+                android.util.Log.w("couchtv.home", "tiles window refused, drawing them over the page: ${e.message}")
+                tilesFallback = true
+            }
+        }
+        if (tilesIn == 0 && t.parent == null) {
+            addContentView(t, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            tilesIn = 2
+        }
+        js("window.tv && tv.syncTiles && tv.syncTiles()")
+    }
+
+    private fun detachTiles() {
+        val t = tiles ?: return
+        when (tilesIn) {
+            1 -> try { windowManager.removeViewImmediate(t) } catch (e: Exception) {}
+            2 -> (t.parent as? ViewGroup)?.removeView(t)
+        }
+        tilesIn = 0
     }
 
     private var built = 0L
@@ -103,6 +183,8 @@ class HomeActivity : Activity() {
             settings.textZoom = 100
             addJavascriptInterface(Native(), "TVOS")
             webViewClient = object : WebViewClient() {
+                // a new page (first load, a reload, the page's restart()): the tiles of the old one go; the new one sends its own
+                override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) { tiles?.clear() }
                 override fun onPageFinished(view: WebView, url: String) {
                     ready = true; view.requestFocus()
                     android.util.Log.i("couchtv.home", "page ready in ${android.os.SystemClock.uptimeMillis() - built} ms")
@@ -132,7 +214,10 @@ class HomeActivity : Activity() {
 
     private fun load() { web?.loadUrl("$base/tv/") }
 
-    override fun onResume() { super.onResume(); front = true; hideBars(); if (ready) js("window.tv && tv.resume()") }
+    override fun onResume() {
+        super.onResume(); front = true; hideBars()
+        if (ready) { js("window.tv && tv.resume()"); js("window.tv && tv.syncTiles && tv.syncTiles()") }
+    }
     // the video background stops while an app is in front
     override fun onPause() { super.onPause(); front = false; js("window.tv && tv.pause && tv.pause()") }
     @Volatile private var front = false
@@ -160,6 +245,10 @@ class HomeActivity : Activity() {
             }
             return true
         }
+        // Smooth tiles: left and right move the app's own focus straight away; the page still gets the key,
+        // decides, and its answer confirms or corrects it (TilesLayer.predict)
+        if (e.action == KeyEvent.ACTION_DOWN && ready && (e.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || e.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT))
+            tiles?.predict(if (e.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1)
         return super.dispatchKeyEvent(e)
     }
     private var menuHeld = false
@@ -218,6 +307,17 @@ class HomeActivity : Activity() {
             Thread { runCatching { Tv.powerOff() } }.start()
             return true
         }
+        // Smooth tiles (TilesLayer.kt): these run on the WebView's bridge thread, so the JSON is read here and
+        // only the result goes to the main thread
+        @JavascriptInterface fun tiles(json: String) {
+            val m = runCatching { TilesLayer.parse(json) }.getOrNull() ?: return
+            main.post { if (!isDestroyed) tiles?.model(m) }
+        }
+        @JavascriptInterface fun tilesFocus(json: String) {
+            val f = runCatching { TilesLayer.parseFocus(json) }.getOrNull() ?: return
+            main.post { if (!isDestroyed) tiles?.focus(f) }
+        }
+        @JavascriptInterface fun tilesShow(show: Boolean, n: Int) { main.post { if (!isDestroyed) tiles?.show(show, n) } }
     }
 
     private fun tvApps(): List<ResolveInfo> = Tv.tvLaunchables().filter { it.activityInfo.packageName != packageName }
@@ -259,15 +359,20 @@ class HomeActivity : Activity() {
     // stretched over a dock tile on a big 4K screen (issue #17).
     private fun iconImage(pkg: String): ByteArray? {
         icons[pkg]?.let { return it }
-        val ri = tvApps().firstOrNull { it.activityInfo.packageName == pkg }
-        val d = ri?.let { sharp(pkg, it.activityInfo.iconResource) }
-            ?: try { sharp(pkg, packageManager.getApplicationInfo(pkg, 0).icon) ?: packageManager.getApplicationIcon(pkg) } catch (e: Exception) { return null }
-        val n = 256
-        val bmp = Bitmap.createBitmap(n, n, Bitmap.Config.ARGB_8888)
-        d.setBounds(0, 0, n, n); d.draw(Canvas(bmp))
+        val bmp = iconBitmap(pkg, 256) ?: return null
         val bytes = ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.PNG, 100, it); bmp.recycle() }.toByteArray()
         icons[pkg] = bytes
         return bytes
+    }
+
+    /** An app's icon drawn at n x n: as a PNG for the page (iconImage), as it is for the app's own tiles (TilesLayer). */
+    private fun iconBitmap(pkg: String, n: Int): Bitmap? {
+        val ri = tvApps().firstOrNull { it.activityInfo.packageName == pkg }
+        val d = ri?.let { sharp(pkg, it.activityInfo.iconResource) }
+            ?: try { sharp(pkg, packageManager.getApplicationInfo(pkg, 0).icon) ?: packageManager.getApplicationIcon(pkg) } catch (e: Exception) { return null }
+        val bmp = Bitmap.createBitmap(n, n, Bitmap.Config.ARGB_8888)
+        d.setBounds(0, 0, n, n); d.draw(Canvas(bmp))
+        return bmp
     }
 
     /** An app's drawable at the highest density it ships (null if it has none we can read). */
@@ -280,6 +385,7 @@ class HomeActivity : Activity() {
 
     override fun onDestroy() {
         if (shown?.get() === this) shown = null
+        detachTiles(); tiles?.destroy(); tiles = null
         web?.let { web = null; it.stopLoading(); it.destroy() }
         super.onDestroy()
     }

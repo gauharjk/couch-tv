@@ -157,6 +157,9 @@
   var MOVING = true;
   // Lighter home (#58): no blur, no soft shadows, a photo that holds still, smaller pictures. For a slow box.
   var LIGHTER = false;
+  // Smooth tiles (the on-TV app only, NATIVE-TILES-PLAN.md): the app draws the dock and the Keep watching
+  // cards itself. Home settings, Look, else on wherever the app can (TVOS.tiles).
+  var SMOOTH = false;
   // WebViews before Chrome 84 (still on many Android 9 TVs) skip gap in a flex box, so icons touch
   // their words and rows touch each other. html.no-flex-gap lets app.css put margins in instead (#26).
   (function () {
@@ -308,12 +311,14 @@
     idlePhotoTimer = null;
     idlePhotoActive = false;
     document.documentElement.classList.remove("idle-photo");
+    ntCheck();
     if (!idlePhotoAllowed()) return;
     idlePhotoTimer = setTimeout(function () {
       idlePhotoTimer = null;
       if (!idlePhotoAllowed()) return;
       idlePhotoActive = true;
       document.documentElement.classList.add("idle-photo");
+      ntCheck();
     }, IDLE_PHOTO_SECONDS * 1000);
   }
   function idlePhotoInput(e) {
@@ -404,6 +409,9 @@
     document.documentElement.classList.toggle("gi-stay", GLASS_FOCUS === "glass");
     SOUND_STYLE = ["system", "soft", "off"].indexOf(ST.nav_sound || HOME.nav_sound) >= 0 ? (ST.nav_sound || HOME.nav_sound) : "system";
     document.documentElement.classList.toggle("glass-icons", GLASS_ICONS);
+    SMOOTH = !!(TV && TV.tiles) && (typeof ST.smooth_tiles === "boolean" ? ST.smooth_tiles : true);
+    NT.cap = SMOOTH && NIGHT && !GLASS_ICONS && !OLD_ENGINE;   // the looks the app's tiles cover
+    document.documentElement.classList.toggle("nt-cap", NT.cap);
     GLASS_AMT = glassAmount();
     CLOCK_LIQUID = (ST.clock_style || HOME.clock_style) === "liquid";
     glassClasses();
@@ -1217,6 +1225,7 @@
       // the row shows while someone has a show on the go, or while a song plays
       var anyone = KW_ON && PEOPLE.some(function (p) { return (data.showsBy[p.id] || []).length; });
       $("shelf-section").classList.toggle("empty", !anyone && !on);
+      if ($("np-slot").classList.contains("on") !== on) ntSoon(true);   // the cards' strip moves over for it
       $("np-slot").classList.toggle("on", on);
     }
     if (!on) { el.innerHTML = ""; return; }
@@ -1260,6 +1269,7 @@
       renderNp();
       renderAmbientMusic();
       if (had !== !!music && (zone === "np" || zone === "ambient") && !music) paintFocus();
+      ntCheck();   // the music screen may have come up by itself
     }, function () {
       if (music) {
         music = null;
@@ -1319,6 +1329,7 @@
     var m = minutesLeft();
     var dim = bedtimeOn() && m > 0 && m <= 15;
     document.documentElement.classList.toggle("bedtime-dim", dim);
+    ntCheck();
     soundscapeFollowSleep(m);
   }
   function minutesLeft() {
@@ -1550,6 +1561,7 @@
     } else if (ov) {
       ov.classList.remove("active");
     }
+    ntCheck();
   }
   function checkSmartIdle() {
     if (!SMART_IDLE.enabled || document.hidden || screenOffActive || idleAmbientActive) return;
@@ -1800,6 +1812,7 @@
     var was = kidsOn();
     window.KidsMode.sync(p);
     if (kidsOn() && !was) kidsCover();
+    ntCheck();
   }
   // going into kids mode: whatever was open here closes first, so nothing is left behind the shelf
   function kidsCover() {
@@ -1872,6 +1885,7 @@
   // Keep watching shows up to ten per person; the row slides along under the remote.
   var KEEP_MAX = 10;
   function renderShelf() {
+    ntSoon(true);   // the app's copy of the cards follows, once this frame is laid out
     var track = $("shelf");
     data.shows = KW_ON ? (data.showsBy[who] || []).slice(0, KEEP_MAX) : [];
     var anyone = KW_ON && PEOPLE.some(function (p) { return (data.showsBy[p.id] || []).length; });
@@ -2060,6 +2074,7 @@
       (lift ? t("app_lift_hint") : NIGHT && expanded && zone === "grid" ? t("app_add_hint") : "");
     $("hint").textContent = text;
     $("hint").classList.toggle("on", !!text);
+    if (document.documentElement.classList.contains("hinting") !== !!text) ntSoon(false);   // the cards step aside for it
     document.documentElement.classList.toggle("hinting", !!text);
   }
   function flash(text) {
@@ -2349,6 +2364,7 @@
   }
 
   function renderGrid() {
+    ntSoon(true);   // the app's copy of the dock follows, once this frame is laid out
     document.documentElement.classList.toggle("expanded", expanded);
     document.documentElement.classList.toggle("lifting", !!lift);
     gridItems = gridList();
@@ -2394,6 +2410,218 @@
     });
   }
 
+  // ---------------- smooth tiles: the on-TV app draws the dock and the cards (NATIVE-TILES-PLAN.md) ----------------
+  // Only with window.TVOS.tiles (the on-TV app, TilesLayer.kt), Smooth tiles on, and the Night look without
+  // glass app icons (NT.cap). The page stays in charge of everything: it lays its tiles out as always and
+  // tells the app where each one is on screen (TVOS.tiles), where the focus is (TVOS.tilesFocus) and
+  // whether to show them (TVOS.tilesShow). While nothing else is on screen with them (nativeOk) the app's
+  // tiles are up and the page's own are laid out but unseen (html.nt, set once the app says its tiles are
+  // drawn). A menu, a screen or a picked-up app brings the page's own back first, then the app's go.
+  // OK still opens an app through the page (activate). Anywhere else none of this runs.
+  var NT = { cap: false, on: false, key: false, raf: 0, dirty: false, shown: false, n: 0, seq: 0, scroll: 0, wait: 0,
+    dpr: 1, glyphs: {}, look: null };
+  var NT_ZONES = ["grid", "shelf", "quick", "people", "np"];
+  function nativeOk() {
+    if (!NT.cap || !gridEls.length || NT_ZONES.indexOf(zone) < 0 || lift) return false;
+    if (kidsOn() || screenOffActive || idleAmbientActive || idlePhotoActive) return false;
+    var c = document.documentElement.classList;
+    return !c.contains("bedtime-dim") && !c.contains("ambient-active") && !c.contains("setting") &&
+      !c.contains("gearing") && !c.contains("apping");
+  }
+  function ntCall(fn, a, b) {
+    try { if (b === undefined) TV[fn](a); else TV[fn](a, b); } catch (e) {}
+  }
+  // The app's tiles up or down, when that changes. Going up: the model and the focus first, then show
+  // (ntFrame); the page's own step back only on tv.tilesReady. Going down: the page's own are shown
+  // straight away and the app's hidden a moment later, so there is never a frame with neither.
+  function ntCheck() {
+    if (!NT.cap) return;
+    var ok = nativeOk();
+    if (ok === NT.on) return;
+    NT.on = ok;
+    NT.shown = false;
+    if (ok) { NT.dirty = true; ntSoon(false); return; }
+    document.documentElement.classList.remove("nt");
+    var n = ++NT.n;
+    setTimeout(function () { if (!NT.on) ntCall("tilesShow", false, n); }, 40);
+  }
+  // Coalesced into the next frame, after the page has laid this one out: one set of rect reads per change.
+  function ntSoon(model) {
+    if (model) NT.dirty = true;
+    if (!NT.on || NT.raf) return;
+    NT.raf = requestAnimationFrame(ntFrame);
+  }
+  function ntFrame() {
+    NT.raf = 0;
+    if (!NT.on) return;
+    if (NT.dirty) {
+      NT.dirty = false;
+      var m = null;
+      try { m = ntModel(); } catch (e) { m = null; }
+      if (!m) { ntStop(); return; }
+      ntCall("tiles", JSON.stringify(m));
+    }
+    ntCall("tilesFocus", ntFocusJson(false));
+    // a tool tile's drawing still on its way: shown with the model that has it
+    if (!NT.shown && !NT.wait) { NT.shown = true; ntCall("tilesShow", true, ++NT.n); }
+  }
+  // Something the page did not expect: its own tiles for the rest of this visit.
+  function ntStop() {
+    NT.cap = false; NT.on = false;
+    document.documentElement.classList.remove("nt");
+    ntCall("tilesShow", false, ++NT.n);
+  }
+  function ntFocusJson(key) {
+    return JSON.stringify({ zone: zone === "grid" || zone === "shelf" ? zone : "", index: zone === "shelf" ? s : g,
+      scroll: NT.scroll, seq: ++NT.seq, k: key ? 1 : 0, shelf: !document.documentElement.classList.contains("hinting") });
+  }
+  // On every paint while the app's tiles are up. No rect reads here: scrollShelf has the slide already.
+  // key: the answer to one arrow key, which the app may have guessed already (TilesLayer.predict).
+  function ntFocus(key) {
+    ntCheck();
+    if (!NT.on || (NT.raf && !key)) return;   // a frame on its way sends it anyway
+    ntCall("tilesFocus", ntFocusJson(key));
+  }
+  function ntKeyDone() {
+    if (!NT.key) return;
+    NT.key = false;
+    ntFocus(true);
+  }
+  function ntSync() {
+    if (!NT.cap) return;
+    ntCheck();
+    NT.shown = false;
+    ntSoon(true);
+  }
+
+  // ---- what the app is sent: every tile's box in device pixels, read once per change ----
+  function ntPx(v) { return (parseFloat(v) || 0) * NT.dpr; }
+  // An element's box, leaving out every transform on it and between it and anchor (the focused tile's
+  // zoom, the cards' slide): offsets up to anchor, then anchor's own box on screen (ar), or from its corner.
+  function ntBox(el, anchor, ar) {
+    var x = 0, y = 0, e = el, d = NT.dpr;
+    while (e && e !== anchor) {
+      x += e.offsetLeft; y += e.offsetTop;
+      e = e.offsetParent;
+      if (e) { x += e.clientLeft; y += e.clientTop; }
+    }
+    if (!e) return null;
+    if (ar) { x += ar.left; y += ar.top; }
+    return [Math.round(x * d), Math.round(y * d), Math.round(el.offsetWidth * d), Math.round(el.offsetHeight * d)];
+  }
+  function ntRadius(el, w) {
+    var r = getComputedStyle(el).borderTopLeftRadius || "0";
+    return /%/.test(r) ? parseFloat(r) / 100 * w : ntPx(r);
+  }
+  function ntText(el) {
+    if (!el) return null;
+    var cs = getComputedStyle(el), size = ntPx(cs.fontSize);
+    return { size: size, lh: ntPx(cs.lineHeight) || size * 1.2, weight: parseInt(cs.fontWeight, 10) || 400, color: cs.color,
+      ls: ntPx(cs.letterSpacing), upper: cs.textTransform === "uppercase", pad: ntPx(cs.paddingLeft) };
+  }
+  // The focus effects, as app.css draws them in this look (the Night dock, Glass panels, Lighter home, and
+  // the html.nt-cap card rules), in device pixels from the page's own rem.
+  function ntLook() {
+    var R = ntPx(getComputedStyle(document.documentElement).fontSize), glass = GLASS !== "off";
+    return { rem: R, scale: glass ? 1.1 : 1.16, lift: (glass ? 0.5 : 0.625) * R, ring: (LIGHTER || !glass ? 0.25 : 0.1875) * R,
+      z0: LIGHTER ? 0 : 0.5 * R, z1: LIGHTER ? 0 : (glass ? 1.5 : 1.125) * R, dim: 0.18,
+      cardScale: 1.05, cardRing: 0.1875 * R, cz: LIGHTER ? 0 : 1.25 * R,
+      edge: Math.max(1, Math.round(0.0625 * R)), edgeColor: "rgba(255, 210, 220, 0.16)", dotRing: 0.1875 * R,
+      dur: LIGHTER ? 160 : 200, scroll: LIGHTER ? 160 : 280, fade: 240,
+      label: null, word: null, nap: null, title: null, sub: null };
+  }
+  // A tool tile's line drawing (gear, More apps, an input) as a PNG at its focused size, drawn once per
+  // drawing and size. Until it is ready the app's tiles wait to be shown (NT.wait).
+  function ntSvg(svg, w, h) {
+    var copy = svg.cloneNode(true), from = [svg].concat(Array.prototype.slice.call(svg.querySelectorAll("*")));
+    var to = [copy].concat(Array.prototype.slice.call(copy.querySelectorAll("*")));
+    from.forEach(function (el, i) {
+      var cs = getComputedStyle(el);
+      ["fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "opacity"].forEach(function (p) { to[i].setAttribute(p, cs.getPropertyValue(p)); });
+      to[i].removeAttribute("class");
+    });
+    copy.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    copy.setAttribute("width", w); copy.setAttribute("height", h);
+    return new XMLSerializer().serializeToString(copy);
+  }
+  function ntGlyph(svg, face) {
+    var fr = face.getBoundingClientRect(), sr = svg.getBoundingClientRect(), k = face.offsetWidth / (fr.width || 1), d = NT.dpr;
+    var rect = [Math.round((sr.left - fr.left) * k * d), Math.round((sr.top - fr.top) * k * d), Math.round(sr.width * k * d), Math.round(sr.height * k * d)];
+    var w = Math.max(1, Math.round(rect[2] * NT.look.scale)), h = Math.max(1, Math.round(rect[3] * NT.look.scale));
+    var id = svg.innerHTML + "@" + w + "x" + h, url = NT.glyphs[id];
+    if (url === undefined) {
+      NT.glyphs[id] = url = null;
+      NT.wait++;
+      var im = new Image(), done = function (u) { NT.glyphs[id] = u; NT.wait--; ntSoon(true); };
+      im.onload = function () {
+        var u = "";
+        try {
+          var c = document.createElement("canvas");
+          c.width = w; c.height = h;
+          c.getContext("2d").drawImage(im, 0, 0, w, h);
+          u = c.toDataURL("image/png");
+        } catch (e) {}
+        done(u);
+      };
+      im.onerror = function () { done(""); };
+      im.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(ntSvg(svg, w, h));
+    }
+    return { url: url || null, rect: rect };
+  }
+  function ntModel() {
+    NT.dpr = window.devicePixelRatio || 1;
+    var look = NT.look = ntLook(), d = NT.dpr;
+    var apps = $("apps-section"), ar = apps.getBoundingClientRect(), dock = [], keys = {};
+    gridEls.forEach(function (el, i) {
+      var it = gridItems[i] || {}, face = el.querySelector(".face"), r = ntBox(el, apps, ar);
+      if (!face || !r) throw new Error("tile " + i);   // the focus is sent by index: every tile or none
+      var kind = face.classList.contains("tool") ? "tool" : face.classList.contains("word") ? "word" : "app";
+      var img = kind === "app" ? face.querySelector("img") : null, svg = kind === "tool" ? face.querySelector("svg") : null;
+      var lab = el.querySelector(".label"), dot = el.querySelector(".dot"), key = gridKey(it) || "tile";
+      while (keys[key]) key += "+";
+      keys[key] = 1;
+      var tile = { key: key, kind: kind, rect: r, bg: getComputedStyle(face).backgroundColor, radius: ntRadius(face, r[2]),
+        img: img ? img.src : null, label: it.name || "", lrect: lab ? ntBox(lab, el) : null,
+        dot: dot ? ntBox(dot, el) : null, dotc: dot ? getComputedStyle(dot).backgroundColor : null };
+      if (lab && !look.label) look.label = ntText(lab);
+      if (kind === "word") { tile.word = face.textContent; if (!look.word) look.word = ntText(face); }
+      if (svg) { var gl = ntGlyph(svg, face); tile.glyph = gl.url; tile.grect = gl.rect; }
+      dock.push(tile);
+    });
+    // app.css, .theme-night .app .face.word: for an icon the app cannot load
+    if (!look.word) look.word = { size: 1.125 * look.rem, lh: 1.35 * look.rem, weight: 650, color: "rgb(255, 255, 255)", ls: 0, upper: false, pad: 0.5 * look.rem };
+    var shelf = null, sec = $("shelf-section");
+    if (shelfEls.length && !expanded && shelfOn()) {
+      var sr = sec.getBoundingClientRect(), cards = [];
+      shelfEls.forEach(function (el, i) {
+        var it = data.shows[i] || {}, r = ntBox(el, sec, sr);
+        if (!r) throw new Error("card " + i);
+        var th = el.querySelector(".thumb"), nap = el.querySelector(".nap"), ic = nap ? nap.querySelector("img") : null;
+        var b = el.querySelector(".t > b"), ep = el.querySelector(".t > i"), bar = el.querySelector(".nbar");
+        var nb = nap ? ntBox(nap, el) : null, ib = ic ? ntBox(ic, el) : null, tb = nb;
+        if (nb && ib) {   // the app's name starts after its icon
+          var x = ib[0] + ib[2] + Math.round(ntPx(getComputedStyle(nap).columnGap) || ntPx(getComputedStyle(ic).marginRight));
+          tb = [x, nb[1], Math.max(0, nb[0] + nb[2] - x), nb[3]];
+        }
+        if (nap && !look.nap) look.nap = ntText(nap);
+        if (b && !look.title) look.title = ntText(b);
+        if (ep && !look.sub) look.sub = ntText(ep);
+        cards.push({ key: "c" + i + ":" + (it.id || it.title || ""), kind: "card", rect: r,
+          bg: getComputedStyle(el).backgroundColor, radius: ntRadius(el, r[2]),
+          img: th && th.tagName === "IMG" ? th.src : null, trect: th ? ntBox(th, el) : null,
+          tbg: th ? getComputedStyle(th).backgroundColor : null, tradius: th ? ntRadius(th, 0) : 0,
+          app: nap ? nap.textContent : "", appIcon: ic ? ic.src : null, irect: ib, iradius: ic ? ntRadius(ic, 0) : 0, nrect: tb,
+          title: b ? b.textContent : "", brect: b ? ntBox(b, el) : null,
+          sub: ep ? ep.textContent : "", srect: ep ? ntBox(ep, el) : null,
+          progress: bar ? Number(it.progress) || 0 : 0, prect: bar ? ntBox(bar, el) : null,
+          pbg: bar ? getComputedStyle(bar).backgroundColor : null, pradius: bar ? ntRadius(bar, 0) : 0 });
+      });
+      var cr = $("shelf").parentNode.getBoundingClientRect();
+      shelf = { clip: [Math.round(cr.left * d), Math.round(cr.top * d), Math.round(cr.width * d), Math.round(cr.height * d)], tiles: cards };
+    }
+    return { dpr: d, look: look, dock: dock, shelf: shelf };
+  }
+
   // ---------------- focus ----------------
   function clearFocus() {
     shelfEls.concat(gridEls, quickEls).forEach(function (el) { if (el) el.classList.remove("focus"); });
@@ -2404,7 +2632,7 @@
   function scrollShelf() {
     var track = $("shelf");
     var el = shelfEls[s];
-    if (!el) { track.style.transform = ""; return; }
+    if (!el) { track.style.transform = ""; NT.scroll = 0; return; }
     var step = el.offsetWidth + parseFloat(getComputedStyle(track).columnGap || 0);
     // how many cards fit: three glass cards on the Night look, about five posters on Classic
     var fit = Math.max(1, Math.floor((track.parentNode.clientWidth + step - el.offsetWidth) / step));
@@ -2412,6 +2640,7 @@
     var first = NIGHT ? s - fit + 1 : s - 2;
     first = Math.max(0, Math.min(first, shelfEls.length - fit));
     track.style.transform = "translateX(" + (-first * step) + "px)";
+    NT.scroll = -first * step * (window.devicePixelRatio || 1);   // the app's cards slide the same way
   }
 
   function shelfOn() { return !$("shelf-section").classList.contains("empty"); }
@@ -2419,7 +2648,13 @@
   function peopleOn() { return peopleCount() >= 2; }
   function toPeople() { zone = "people"; pi = whoIndex(); }
 
+  // Every paint also tells the app's own tiles where the focus is, when they are up (ntFocus). An arrow
+  // key sends it once, after the whole key is handled (ntKeyDone).
   function paintFocus() {
+    paintZone();
+    if (!NT.key) ntFocus(false);
+  }
+  function paintZone() {
     if (zone === "settings") { renderSettings(); return; }
     if (zone === "smart") { window.smartHome.paint(); return; }
     if (zone === "ambient") { renderAmbientMusic(); return; }
@@ -2779,6 +3014,7 @@
     }).join("");
     pop.classList.add("on");
     document.documentElement.classList.add("gearing");
+    ntCheck();   // also opened by the remote's own Settings key, from the app
     // above the gear tile, kept inside the screen's safe area
     var el = gridEls[g], rem = innerWidth / 120;
     if (el) {
@@ -3188,6 +3424,11 @@
     rows.push({ kind: "toggle", key: "lighter", label: t("lighter"), value: LIGHTER ? t("on") : t("off"), act: function () {
       LIGHTER = !LIGHTER; ST.lighter = LIGHTER; saveSettings();
       document.documentElement.classList.toggle("lighter", LIGHTER); ambientSync(); movingTiles(); renderShelf(); paintFocus();
+    } });
+    // the on-TV app draws the dock and the Keep watching cards itself, so they glide on a slow TV;
+    // off is the page's own tiles exactly as before. Seen once Home settings closes (the page starts again).
+    if (TV && TV.tiles) rows.push({ kind: "toggle", key: "smooth-tiles", label: t("smooth_tiles"), value: SMOOTH ? t("on") : t("off"), act: function () {
+      SMOOTH = !SMOOTH; ST.smooth_tiles = SMOOTH; saveSettings();
     } });
     rows.push({ kind: "toggle", key: "glass-icons", label: t("glass_icons"), value: GLASS_ICONS ? t("on") : t("off"), act: function () {
       GLASS_ICONS = !GLASS_ICONS; ST.glass_icons = GLASS_ICONS; saveSettings();
@@ -3606,6 +3847,7 @@
     pop.style.left = pop.style.top = "";
     pop.classList.add("on", "ask");
     document.documentElement.classList.add("gearing");
+    ntCheck();
   }
   function answerAsk(yes) {
     $("gear-pop").classList.remove("on", "ask");
@@ -3879,6 +4121,7 @@
 
   // Focus is never lost: after any key, if nothing shows focus, the first dock app gets it.
   function ensureFocus() {
+    ntCheck();   // after every key: a menu or screen it opened takes the app's tiles away
     if (document.querySelector(".focus")) return;
     zone = "grid"; g = 0;
     paintFocus();
@@ -4123,7 +4366,7 @@
       return;
     }
     var arrow = arrowOf(e);
-    if (arrow) { blip(arrow[0], arrow[1]); move(arrow[0], arrow[1]); }
+    if (arrow) { blip(arrow[0], arrow[1]); NT.key = NT.on; move(arrow[0], arrow[1]); }
     else if (isBack(e)) goHome();
     else if (isSettings(e)) { if (!e.repeat) settingsKey(); }   // the remote's own Settings/gear key
     else if (isMenu(e)) { if (!e.repeat) hold(); }   // optional: many remotes have no Menu key
@@ -4131,6 +4374,7 @@
     e.preventDefault();
     ensureFocus();
     resetIdlePhoto();
+    ntKeyDone();
   });
   document.addEventListener("keyup", function (e) {
     if (screenOffActive || idleAmbientActive) {
@@ -4324,7 +4568,11 @@
     // the launcher's updater has news (Updater.kt)
     update: function (state) { updChanged(state); },
     // Android's "default home app" chooser closed (HomeRole.kt, #98)
-    homeAnswered: function (held) { homeAnswered(held); } };
+    homeAnswered: function (held) { homeAnswered(held); },
+    // Smooth tiles (on-TV app, TilesLayer.kt): send everything again (back on screen, a missed guess),
+    // and the app's tiles are up, so the page's own can step back
+    syncTiles: function () { ntSync(); },
+    tilesReady: function (n) { if (NT.on && n === NT.n) document.documentElement.classList.add("nt"); } };
 
   function start() {
     readConfig();
@@ -4372,6 +4620,9 @@
       if (SCENES.length > 1) setInterval(nextScene, SCENE_MS);
       // the clock font must be in before the glass is measured
       if (document.fonts) document.fonts.load("300 10px Antonio").then(function () { glassShown = ""; clock(); });
+      // the app's copy of the tiles is measured again once the fonts are in, and after any resize
+      if (NT.cap && document.fonts && document.fonts.ready) document.fonts.ready.then(function () { ntSoon(true); });
+      if (NT.cap) window.addEventListener("resize", function () { ntSoon(true); });
       refreshWeather();
       setInterval(refreshWeather, WX_EVERY * 60000);
     }
